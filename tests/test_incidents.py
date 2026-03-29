@@ -110,4 +110,5 @@ TEST_INCIDENTS = [
 if __name__ == "__main__":
     print(f"Loaded {len(TEST_INCIDENTS)} test incidents\n")
     for inc in TEST_INCIDENTS:
-        print(f"  {inc['id']} — {inc['label']}")
+        print(f"  {inc['id']} — {inc['label']}"
+)

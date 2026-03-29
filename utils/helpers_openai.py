@@ -11,12 +11,10 @@ RETRY_DELAY = 5
 
 
 def get_client() -> OpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
+    import streamlit as st
+    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
     if not api_key:
-        raise ValueError(
-            "OPENAI_API_KEY not found. "
-            "Make sure your .env file exists and contains: OPENAI_API_KEY=sk-..."
-        )
+        raise ValueError("OPENAI_API_KEY not found.")
     return OpenAI(api_key=api_key)
 
 
