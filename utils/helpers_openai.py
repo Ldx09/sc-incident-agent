@@ -11,12 +11,24 @@ RETRY_DELAY = 5
 
 
 def get_client() -> OpenAI:
-    import streamlit as st
-    api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not found.")
-    return OpenAI(api_key=api_key)
+    api_key = None
 
+    try:
+        import streamlit as st
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY", "")
+
+    if not api_key:
+        raise ValueError(
+            "OPENAI_API_KEY not found. "
+            "Add it to Streamlit Cloud secrets or your .env file."
+        )
+
+    return OpenAI(api_key=api_key)
 
 def call_model(system_prompt: str, user_message: str, max_tokens: int = 2048) -> str:
     """
