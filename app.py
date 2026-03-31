@@ -5,7 +5,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st
 from fpdf import FPDF
 from agent.pipeline import run_pipeline, PipelineResult, PipelineStepError
-
+from utils.auth import register_user, login_user
 
 st.set_page_config(
     page_title="SC Incident Response Agent",
@@ -66,25 +66,76 @@ IMPACT_COLORS = {
 }
 
 STEP_ERROR_GUIDANCE = {
-    1: (
-        "**The incident parser failed.** This usually means the input text "
-        "was too short or the AI returned unexpected output.\n\n"
-        "**Try:** Add more detail — include supplier names, affected products, "
-        "region, and financial figures."
-    ),
-    2: (
-        "**The context researcher failed.**\n\n"
-        "**Try:** Run the analysis again — this step occasionally times out."
-    ),
-    3: (
-        "**The root cause analyzer failed.** Usually a JSON parsing issue.\n\n"
-        "**Try:** Run the analysis again."
-    ),
-    4: (
-        "**The brief generator failed.**\n\n"
-        "**Try:** Run the analysis again — almost always a transient API issue."
-    ),
+    1: "**The incident parser failed.** Add more detail — supplier names, region, financial figures.",
+    2: "**The context researcher failed.** Try running again.",
+    3: "**The root cause analyzer failed.** Try running again.",
+    4: "**The brief generator failed.** Try running again.",
 }
+
+
+def get_user_id() -> int:
+    return st.session_state.get("user", {}).get("id", 0)
+
+
+def get_username() -> str:
+    return st.session_state.get("user", {}).get("username", "")
+
+
+def show_auth():
+    """Login / Register screen shown before the app."""
+    st.title("SC Incident Response Agent")
+    st.markdown(
+        "An AI-powered supply chain incident response tool. "
+        "Create an account to save your incidents, watchlist, and playbooks."
+    )
+    st.divider()
+
+    tab_login, tab_register = st.tabs(["Login", "Create account"])
+
+    with tab_login:
+        st.markdown("### Welcome back")
+        username = st.text_input("Username", key="login_username",
+                                 placeholder="your username")
+        password = st.text_input("Password", type="password", key="login_password",
+                                 placeholder="your password")
+
+        if st.button("Login", type="primary", use_container_width=True, key="btn_login"):
+            if not username or not password:
+                st.error("Please enter your username and password.")
+            else:
+                ok, user, msg = login_user(username, password)
+                if ok:
+                    st.session_state["user"] = user
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    with tab_register:
+        st.markdown("### Create your account")
+        st.caption("Your data is private — only you can see your incidents and playbooks.")
+
+        new_username = st.text_input("Username", key="reg_username",
+                                     placeholder="choose a username (3+ characters)")
+        new_email    = st.text_input("Email", key="reg_email",
+                                     placeholder="your@email.com")
+        new_password = st.text_input("Password", type="password", key="reg_password",
+                                     placeholder="8+ characters, at least one number")
+        new_confirm  = st.text_input("Confirm password", type="password",
+                                     key="reg_confirm", placeholder="repeat your password")
+
+        if st.button("Create account", type="primary",
+                     use_container_width=True, key="btn_register"):
+            if not new_username or not new_email or not new_password:
+                st.error("Please fill in all fields.")
+            elif new_password != new_confirm:
+                st.error("Passwords do not match.")
+            else:
+                ok, msg = register_user(new_username, new_email, new_password)
+                if ok:
+                    st.success(f"Account created! You can now login as **{new_username.strip().lower()}**.")
+                else:
+                    st.error(msg)
 
 
 def severity_badge(level: str) -> str:
@@ -105,118 +156,91 @@ def generate_pdf(result: PipelineResult) -> bytes:
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
 
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "Supply Chain Incident Brief", ln=True)
-    pdf.set_font("Helvetica", "", 11)
-    pdf.cell(
-        0, 6,
-        f"ID: {result.brief.incident_id}  |  "
-        f"Severity: {result.brief.severity_level}  |  "
-        f"Status: {result.brief.status}",
-        ln=True
-    )
-    pdf.ln(4)
+    def safe(t): return str(t).encode("latin-1", "replace").decode("latin-1")
 
     def section(title):
         pdf.set_font("Helvetica", "B", 13)
         pdf.set_fill_color(240, 240, 240)
-        pdf.cell(0, 8, title, ln=True, fill=True)
+        pdf.cell(0, 8, safe(title), ln=True, fill=True)
         pdf.set_font("Helvetica", "", 10)
         pdf.ln(2)
 
     def body(text):
-        safe = str(text).encode("latin-1", "replace").decode("latin-1")
-        pdf.multi_cell(0, 5, safe)
+        pdf.multi_cell(0, 5, safe(text))
         pdf.ln(2)
 
-    section("Executive Summary")
-    body(result.brief.executive_summary)
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 10, "Supply Chain Incident Brief", ln=True)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 6,
+        safe(f"ID: {result.brief.incident_id}  |  "
+             f"Severity: {result.brief.severity_level}  |  "
+             f"Status: {result.brief.status}"), ln=True)
+    pdf.ln(4)
 
+    section("Executive Summary");  body(result.brief.executive_summary)
     section("Risk Scores")
     r = result.brief.risk_score
-    body(
-        f"Overall: {r.overall}/10  |  Operational: {r.operational}/10  |  "
-        f"Financial: {r.financial}/10  |  Reputational: {r.reputational}/10"
-    )
+    body(f"Overall: {r.overall}/10  |  Operational: {r.operational}/10  |  "
+         f"Financial: {r.financial}/10  |  Reputational: {r.reputational}/10")
     body(r.reasoning)
-
     section("Financial Exposure")
     f = result.brief.financial_exposure
     body(f"${f.minimum_usd:,} - ${f.maximum_usd:,}  (confidence: {f.confidence})")
     body(f.notes)
-
     section("Immediate Actions")
     for a in result.brief.immediate_actions:
         body(f"[{a.priority}] {a.action}")
         body(f"    Owner: {a.owner}  |  Deadline: {a.deadline}")
         body(f"    Why: {a.why}")
-
     section("Root Cause Analysis")
     body(f"Primary root cause: {result.analysis.primary_root_cause}")
     body(f"Vulnerability type: {result.analysis.vulnerability_type}")
     body(f"Recovery timeline: {result.analysis.severity_assessment.recovery_timeline}")
-
     section("Impact Chain")
     for i, step in enumerate(result.analysis.impact_chain, 1):
         body(f"{i}. {step}")
-
     section("Alternative Options")
     for opt in result.brief.alternative_options:
         body(f"* {opt.option}  [{opt.feasibility}]  {opt.estimated_cost_impact}")
-
     section("Stakeholder Email")
     body(f"To: {result.brief.stakeholder_email.to}")
     body(f"Subject: {result.brief.stakeholder_email.subject}")
-    pdf.ln(2)
-    body(result.brief.stakeholder_email.body)
-
+    pdf.ln(2); body(result.brief.stakeholder_email.body)
     section("Monitoring Plan")
     for m in result.brief.monitoring_plan:
         body(f"* {m.metric}  -  check {m.frequency}")
         body(f"  Escalate if: {m.escalation_trigger}")
-
-    section("Analyst Note")
-    body(result.analysis.analyst_note)
-
+    section("Analyst Note"); body(result.analysis.analyst_note)
     return pdf.output()
 
 
 def render_audit_trail(result: PipelineResult):
     from utils.audit import save_audit, get_audit
-
+    user_id = get_user_id()
     brief   = result.brief
     inc_id  = brief.incident_id
     actions = brief.immediate_actions
-
-    existing = get_audit(inc_id)
+    existing = get_audit(inc_id, user_id)
 
     st.divider()
     st.subheader("Decision audit trail")
     st.markdown(
         "Mark which actions were taken and what happened. "
-        "This builds your follow-through rate over time — "
-        "tracked on the dashboard."
+        "Builds your follow-through rate — tracked on the dashboard."
     )
 
-    OUTCOME_OPTIONS = [
-        "not_recorded", "resolved", "partially_resolved",
-        "escalated", "ongoing", "skipped",
-    ]
-    OUTCOME_LABELS = {
-        "not_recorded":       "Not recorded",
-        "resolved":           "Resolved the issue",
-        "partially_resolved": "Partially resolved",
-        "escalated":          "Escalated further",
-        "ongoing":            "Still ongoing",
-        "skipped":            "Decided to skip",
+    OUTCOME_OPTIONS = ["not_recorded","resolved","partially_resolved",
+                       "escalated","ongoing","skipped"]
+    OUTCOME_LABELS  = {
+        "not_recorded":"Not recorded","resolved":"Resolved the issue",
+        "partially_resolved":"Partially resolved","escalated":"Escalated further",
+        "ongoing":"Still ongoing","skipped":"Decided to skip",
     }
-    OUTCOME_COLORS = {
-        "resolved":           "#1D9E75",
-        "partially_resolved": "#BA7517",
-        "escalated":          "#D85A30",
-        "ongoing":            "#378ADD",
-        "skipped":            "#888888",
-        "not_recorded":       "#cccccc",
+    OUTCOME_COLORS  = {
+        "resolved":"#1D9E75","partially_resolved":"#BA7517",
+        "escalated":"#D85A30","ongoing":"#378ADD",
+        "skipped":"#888888","not_recorded":"#cccccc",
     }
 
     existing_actions = {}
@@ -225,121 +249,70 @@ def render_audit_trail(result: PipelineResult):
             existing_actions[a["action_priority"]] = a
 
     audit_data = []
-
     for action in actions:
         prio = action.priority
         prev = existing_actions.get(prio, {})
-
-        with st.expander(
-            f"**[{prio}]** {action.action}",
-            expanded=not bool(existing)
-        ):
+        with st.expander(f"**[{prio}]** {action.action}", expanded=not bool(existing)):
             col_check, col_outcome, col_notes = st.columns([1, 2, 3])
-
             with col_check:
-                was_taken = st.checkbox(
-                    "Action taken",
+                was_taken = st.checkbox("Action taken",
                     value=bool(prev.get("was_taken", False)),
-                    key=f"adt_{inc_id}_{prio}"
-                )
-
+                    key=f"adt_{inc_id}_{prio}")
             with col_outcome:
                 prev_outcome = prev.get("outcome", "not_recorded")
-                if prev_outcome not in OUTCOME_OPTIONS:
-                    prev_outcome = "not_recorded"
-                outcome = st.selectbox(
-                    "Outcome",
-                    options=OUTCOME_OPTIONS,
+                if prev_outcome not in OUTCOME_OPTIONS: prev_outcome = "not_recorded"
+                outcome = st.selectbox("Outcome", options=OUTCOME_OPTIONS,
                     index=OUTCOME_OPTIONS.index(prev_outcome),
                     format_func=lambda x: OUTCOME_LABELS[x],
-                    key=f"ado_{inc_id}_{prio}",
-                    disabled=not was_taken
-                )
+                    key=f"ado_{inc_id}_{prio}", disabled=not was_taken)
                 if was_taken and outcome != "not_recorded":
                     color = OUTCOME_COLORS.get(outcome, "#888")
                     st.markdown(
-                        f'<span style="color:{color};font-size:12px;'
-                        f'font-weight:500">● {OUTCOME_LABELS[outcome]}</span>',
-                        unsafe_allow_html=True
-                    )
-
+                        f'<span style="color:{color};font-size:12px;font-weight:500">'
+                        f'● {OUTCOME_LABELS[outcome]}</span>', unsafe_allow_html=True)
             with col_notes:
-                notes = st.text_input(
-                    "Notes (optional)",
-                    value=prev.get("notes", ""),
+                notes = st.text_input("Notes (optional)", value=prev.get("notes",""),
                     placeholder="What happened? Any blockers?",
-                    key=f"adn_{inc_id}_{prio}"
-                )
-
+                    key=f"adn_{inc_id}_{prio}")
         audit_data.append({
-            "priority":  prio,
-            "action":    action.action,
-            "owner":     action.owner,
-            "deadline":  action.deadline,
+            "priority": prio, "action": action.action,
+            "owner": action.owner, "deadline": action.deadline,
             "was_taken": was_taken,
-            "outcome":   outcome if was_taken else "not_recorded",
-            "notes":     notes,
+            "outcome": outcome if was_taken else "not_recorded",
+            "notes": notes,
         })
 
     st.markdown("---")
     col_overall, col_time, col_lessons = st.columns([2, 1, 3])
-
     existing_outcome_row = existing.get("outcome", {}) if existing else {}
-
-    OVERALL_OPTIONS = ["ongoing", "resolved", "escalated", "closed_unresolved"]
+    OVERALL_OPTIONS = ["ongoing","resolved","escalated","closed_unresolved"]
     OVERALL_LABELS  = {
-        "ongoing":           "Still ongoing",
-        "resolved":          "Fully resolved",
-        "escalated":         "Escalated to leadership",
-        "closed_unresolved": "Closed — unresolved",
+        "ongoing":"Still ongoing","resolved":"Fully resolved",
+        "escalated":"Escalated to leadership","closed_unresolved":"Closed — unresolved",
     }
-    prev_overall = existing_outcome_row.get("overall_outcome", "ongoing")
-    if prev_overall not in OVERALL_OPTIONS:
-        prev_overall = "ongoing"
+    prev_overall = existing_outcome_row.get("overall_outcome","ongoing")
+    if prev_overall not in OVERALL_OPTIONS: prev_overall = "ongoing"
 
     with col_overall:
-        overall_outcome = st.selectbox(
-            "Overall incident outcome",
-            options=OVERALL_OPTIONS,
-            index=OVERALL_OPTIONS.index(prev_overall),
-            format_func=lambda x: OVERALL_LABELS[x],
-            key=f"adoverall_{inc_id}"
-        )
-
+        overall_outcome = st.selectbox("Overall incident outcome",
+            options=OVERALL_OPTIONS, index=OVERALL_OPTIONS.index(prev_overall),
+            format_func=lambda x: OVERALL_LABELS[x], key=f"adoverall_{inc_id}")
     with col_time:
-        resolution_time = st.text_input(
-            "Resolution time",
-            value=existing_outcome_row.get("resolution_time", ""),
-            placeholder="e.g. 3 days",
-            key=f"adtime_{inc_id}"
-        )
-
+        resolution_time = st.text_input("Resolution time",
+            value=existing_outcome_row.get("resolution_time",""),
+            placeholder="e.g. 3 days", key=f"adtime_{inc_id}")
     with col_lessons:
-        lessons = st.text_area(
-            "Lessons learned",
-            value=existing_outcome_row.get("lessons_learned", ""),
-            placeholder="What would you do differently next time?",
-            height=80,
-            key=f"adlessons_{inc_id}"
-        )
+        lessons = st.text_area("Lessons learned",
+            value=existing_outcome_row.get("lessons_learned",""),
+            placeholder="What would you do differently?",
+            height=80, key=f"adlessons_{inc_id}")
 
-    if st.button(
-        "Save audit trail",
-        type="primary",
-        key=f"adsave_{inc_id}"
-    ):
-        save_audit(
-            incident_id=inc_id,
-            actions=audit_data,
-            overall_outcome=overall_outcome,
-            resolution_time=resolution_time,
-            lessons_learned=lessons
-        )
+    if st.button("Save audit trail", type="primary", key=f"adsave_{inc_id}"):
+        save_audit(incident_id=inc_id, actions=audit_data,
+                   overall_outcome=overall_outcome, resolution_time=resolution_time,
+                   lessons_learned=lessons, user_id=user_id)
         taken_count = sum(1 for a in audit_data if a["was_taken"])
-        st.success(
-            f"Saved. {taken_count}/{len(audit_data)} actions marked as taken. "
-            f"Follow-through rate updated on the dashboard."
-        )
+        st.success(f"Saved. {taken_count}/{len(audit_data)} actions marked as taken.")
 
 
 def render_results(result: PipelineResult):
@@ -349,36 +322,29 @@ def render_results(result: PipelineResult):
     context  = result.context
 
     st.divider()
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown("**Incident ID**")
-        st.markdown(f"`{brief.incident_id}`")
+        st.markdown("**Incident ID**"); st.markdown(f"`{brief.incident_id}`")
     with col2:
         st.markdown("**Severity**")
         st.markdown(severity_badge(brief.severity_level), unsafe_allow_html=True)
     with col3:
-        st.markdown("**Type**")
-        st.markdown(f"`{parsed.incident_type}`")
+        st.markdown("**Type**"); st.markdown(f"`{parsed.incident_type}`")
     with col4:
         st.markdown("**Recovery**")
         st.markdown(f"`{analysis.severity_assessment.recovery_timeline}`")
 
     st.divider()
-
     left, right = st.columns([3, 2])
 
     with left:
-        st.subheader("Executive summary")
-        st.info(brief.executive_summary)
-
+        st.subheader("Executive summary"); st.info(brief.executive_summary)
         st.subheader("Immediate actions")
         for action in brief.immediate_actions:
             with st.expander(f"**[{action.priority}]** {action.action}"):
                 st.markdown(f"**Owner:** {action.owner}")
                 st.markdown(f"**Deadline:** {action.deadline}")
                 st.markdown(f"**Why urgent:** {action.why}")
-
         st.subheader("Key decisions required")
         for d in brief.key_decisions_required:
             with st.expander(d.decision):
@@ -388,127 +354,84 @@ def render_results(result: PipelineResult):
     with right:
         st.subheader("Risk scores")
         r = brief.risk_score
-        for label, score in [
-            ("Overall", r.overall),
-            ("Operational", r.operational),
-            ("Financial", r.financial),
-            ("Reputational", r.reputational),
-        ]:
-            color = (
-                "#1D9E75" if score <= 3
-                else "#BA7517" if score <= 6
-                else "#A32D2D"
-            )
+        for label, score in [("Overall",r.overall),("Operational",r.operational),
+                              ("Financial",r.financial),("Reputational",r.reputational)]:
+            color = "#1D9E75" if score<=3 else "#BA7517" if score<=6 else "#A32D2D"
             st.markdown(
                 f'<div style="display:flex;justify-content:space-between;'
                 f'align-items:center;padding:6px 0;border-bottom:1px solid #eee">'
                 f'<span style="font-size:13px">{label}</span>'
                 f'<span style="font-weight:600;color:{color};font-size:15px">'
-                f'{score}/10</span></div>',
-                unsafe_allow_html=True
-            )
-        st.caption(r.reasoning)
-        st.markdown("---")
-
+                f'{score}/10</span></div>', unsafe_allow_html=True)
+        st.caption(r.reasoning); st.markdown("---")
         st.subheader("Financial exposure")
         f = brief.financial_exposure
         st.markdown(
             f'<div style="font-size:20px;font-weight:600">'
-            f'${f.minimum_usd:,} – ${f.maximum_usd:,}</div>',
-            unsafe_allow_html=True
-        )
-        st.caption(f"Confidence: {f.confidence}  |  {f.notes}")
-        st.markdown("---")
-
+            f'${f.minimum_usd:,} – ${f.maximum_usd:,}</div>', unsafe_allow_html=True)
+        st.caption(f"Confidence: {f.confidence}  |  {f.notes}"); st.markdown("---")
         st.subheader("Severity assessment")
         sa = analysis.severity_assessment
-        for label, val in [
-            ("Operational",  sa.operational_impact),
-            ("Financial",    sa.financial_impact),
-            ("Reputational", sa.reputational_impact),
-        ]:
+        for label, val in [("Operational",sa.operational_impact),
+                           ("Financial",sa.financial_impact),
+                           ("Reputational",sa.reputational_impact)]:
             st.markdown(
                 f'<div style="display:flex;justify-content:space-between;padding:4px 0">'
                 f'<span style="font-size:13px;color:#666">{label}</span>'
-                f'{impact_dot(val)}</div>',
-                unsafe_allow_html=True
-            )
+                f'{impact_dot(val)}</div>', unsafe_allow_html=True)
 
     st.divider()
-
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Root cause analysis",
-        "Alternative options",
-        "Stakeholder email",
-        "Monitoring plan",
-        "Research context",
-    ])
+    tab1,tab2,tab3,tab4,tab5 = st.tabs([
+        "Root cause analysis","Alternative options",
+        "Stakeholder email","Monitoring plan","Research context"])
 
     with tab1:
-        st.markdown("**Primary root cause**")
-        st.error(analysis.primary_root_cause)
+        st.markdown("**Primary root cause**"); st.error(analysis.primary_root_cause)
         st.markdown(f"**Vulnerability type:** `{analysis.vulnerability_type}`")
         st.markdown(f"**Confidence:** `{analysis.confidence_level}`")
-
         st.markdown("**Impact chain**")
         for i, step in enumerate(analysis.impact_chain, 1):
             st.markdown(
                 f'<div style="display:flex;gap:12px;padding:6px 0;'
                 f'border-bottom:1px solid #f0f0f0">'
                 f'<span style="font-weight:700;color:#D85A30;min-width:20px">{i}</span>'
-                f'<span style="font-size:14px">{step}</span></div>',
-                unsafe_allow_html=True
-            )
-
+                f'<span style="font-size:14px">{step}</span></div>', unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown("**Contributing factors**")
-            for factor in analysis.contributing_factors:
-                st.markdown(f"• {factor}")
+            for factor in analysis.contributing_factors: st.markdown(f"• {factor}")
         with col_b:
             st.markdown("**Immediate risks (next 48–72h)**")
-            for risk in analysis.immediate_risks:
-                st.markdown(f"⚠️ {risk}")
-
+            for risk in analysis.immediate_risks: st.markdown(f"⚠️ {risk}")
         st.markdown("**Systemic weaknesses exposed**")
-        for w in analysis.systemic_weaknesses_exposed:
-            st.markdown(f"~ {w}")
-
+        for w in analysis.systemic_weaknesses_exposed: st.markdown(f"~ {w}")
         if analysis.analogous_incidents:
             st.markdown("**Analogous incidents**")
             for a in analysis.analogous_incidents:
                 st.markdown(f"**[{a.company}, {a.year}]** {a.lesson}")
-
         st.markdown("**Analyst note**")
         st.markdown(
             f'<div style="border-left:3px solid #D85A30;padding:10px 16px;'
             f'background:#FAECE7;border-radius:0 6px 6px 0;font-size:14px;'
-            f'line-height:1.6">{analysis.analyst_note}</div>',
-            unsafe_allow_html=True
-        )
+            f'line-height:1.6">{analysis.analyst_note}</div>', unsafe_allow_html=True)
 
     with tab2:
         for opt in brief.alternative_options:
             with st.expander(
-                f"**{opt.option}** — {opt.estimated_cost_impact} | `{opt.feasibility}`"
-            ):
+                f"**{opt.option}** — {opt.estimated_cost_impact} | `{opt.feasibility}`"):
                 col_p, col_c = st.columns(2)
                 with col_p:
                     st.markdown("**Pros**")
-                    for p in opt.pros:
-                        st.markdown(f"✓ {p}")
+                    for p in opt.pros: st.markdown(f"✓ {p}")
                 with col_c:
                     st.markdown("**Cons**")
-                    for c in opt.cons:
-                        st.markdown(f"✗ {c}")
+                    for c in opt.cons: st.markdown(f"✗ {c}")
 
     with tab3:
         email = brief.stakeholder_email
         st.markdown(f"**To:** {email.to}")
         st.markdown(f"**Subject:** {email.subject}")
-        st.divider()
-        st.markdown(email.body)
-        st.divider()
+        st.divider(); st.markdown(email.body); st.divider()
         if st.button("Show copyable version", key=f"copy_email_{brief.incident_id}"):
             st.code(email.body, language=None)
 
@@ -520,30 +443,22 @@ def render_results(result: PipelineResult):
 
     with tab5:
         st.markdown(f"**Research confidence:** `{context.confidence_level}`")
-        st.markdown("**Current situation**")
-        st.markdown(context.current_situation)
-        st.markdown("**Market context**")
-        st.markdown(context.market_context)
-
+        st.markdown("**Current situation**"); st.markdown(context.current_situation)
+        st.markdown("**Market context**"); st.markdown(context.market_context)
         col_amp, col_mit = st.columns(2)
         with col_amp:
             st.markdown("**Risk amplifiers**")
-            for r in context.risk_amplifiers:
-                st.markdown(f"▲ {r}")
+            for r in context.risk_amplifiers: st.markdown(f"▲ {r}")
         with col_mit:
             st.markdown("**Risk mitigators**")
-            for r in context.risk_mitigators:
-                st.markdown(f"▼ {r}")
-
+            for r in context.risk_mitigators: st.markdown(f"▼ {r}")
         if context.alternative_suppliers_or_routes:
             st.markdown("**Alternatives identified**")
             for alt in context.alternative_suppliers_or_routes:
                 st.markdown(f"• **{alt.name}** — {alt.notes}")
-
         if context.research_gaps:
             st.markdown("**Research gaps**")
-            for g in context.research_gaps:
-                st.markdown(f"? {g}")
+            for g in context.research_gaps: st.markdown(f"? {g}")
 
     st.divider()
     pdf_bytes = generate_pdf(result)
@@ -554,11 +469,24 @@ def render_results(result: PipelineResult):
         mime="application/pdf",
         type="primary",
     )
-
     render_audit_trail(result)
 
 
 def main():
+    if not st.session_state.get("authenticated"):
+        show_auth()
+        return
+
+    user     = st.session_state["user"]
+    user_id  = user["id"]
+    username = user["username"]
+
+    with st.sidebar:
+        st.markdown(f"**Logged in as:** `{username}`")
+        if st.button("Logout", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+
     st.title("Supply Chain Incident Response Agent")
     st.markdown(
         "Paste a supply chain incident report below. "
@@ -578,7 +506,7 @@ def main():
 
     incident_text = st.text_area(
         "Incident report",
-        value=st.session_state.get("incident_text", ""),
+        value=st.session_state.get("incident_text",""),
         height=180,
         placeholder=(
             "Paste your supply chain incident report here...\n\n"
@@ -587,11 +515,8 @@ def main():
         ),
     )
 
-    is_valid = len(incident_text.strip()) >= 50
-
     run_clicked = st.button(
-        "Run analysis",
-        type="primary",
+        "Run analysis", type="primary",
         disabled=not incident_text.strip(),
         use_container_width=True,
     )
@@ -610,10 +535,8 @@ def main():
             with progress_placeholder.container():
                 for s in range(1, 5):
                     label = {
-                        1: "Parsing incident",
-                        2: "Researching context",
-                        3: "Analyzing root cause",
-                        4: "Generating brief",
+                        1:"Parsing incident", 2:"Researching context",
+                        3:"Analyzing root cause", 4:"Generating brief"
                     }[s]
                     if s in step_messages:
                         msg = step_messages[s]
@@ -625,17 +548,17 @@ def main():
                         st.markdown(
                             f'<div style="color:#aaa;padding:4px 0">'
                             f'Step {s}: {label} — waiting...</div>',
-                            unsafe_allow_html=True
-                        )
+                            unsafe_allow_html=True)
 
         try:
             result = run_pipeline(incident_text, status_callback=status_callback)
-            st.session_state["last_result"] = result
+            st.session_state["last_result"]           = result
+            st.session_state["last_watchlist_matches"] = []
 
             from utils.database import save_incident
             from utils.watchlist import check_incident_against_watchlist
-            save_incident(result)
-            matches = check_incident_against_watchlist(result)
+            save_incident(result, user_id=user_id)
+            matches = check_incident_against_watchlist(result, user_id=user_id)
             st.session_state["last_watchlist_matches"] = matches
 
             progress_placeholder.empty()
@@ -645,17 +568,15 @@ def main():
                 st.warning(
                     f"⚠️ Watchlist alert — this incident involves "
                     f"**{len(matches)}** tracked supplier(s): **{names}**. "
-                    f"Risk scores updated on the Watchlist page."
-                )
+                    f"Risk scores updated on the Watchlist page.")
 
             render_results(result)
 
         except PipelineStepError as e:
             progress_placeholder.empty()
             st.error(f"Analysis failed at Step {e.step}: {e.step_name}")
-            guidance = STEP_ERROR_GUIDANCE.get(e.step, "")
-            if guidance:
-                st.markdown(guidance)
+            guidance = STEP_ERROR_GUIDANCE.get(e.step,"")
+            if guidance: st.markdown(guidance)
             with st.expander("Technical error details"):
                 st.code(str(e.original_error))
 
@@ -667,40 +588,30 @@ def main():
                 st.info("Wait 60 seconds then click Run analysis again.")
             elif "quota" in error_msg.lower():
                 st.info("Add credits at platform.openai.com/settings/billing")
-            elif "api key" in error_msg.lower() or "invalid" in error_msg.lower():
-                st.info("Check your `.env` file — the key should start with `sk-...`")
-            elif "connect" in error_msg.lower():
-                st.info("Check your internet connection and try again.")
+            elif "api key" in error_msg.lower():
+                st.info("Check your API key in Streamlit Cloud secrets.")
 
         except Exception as e:
             progress_placeholder.empty()
             st.error("An unexpected error occurred.")
             with st.expander("Technical error details"):
                 st.code(str(e))
-            st.markdown(
-                "**Common fixes:**\n"
-                "- Check your `OPENAI_API_KEY` in `.env`\n"
-                "- Make sure you have API credits at platform.openai.com\n"
-                "- Try a shorter incident description\n"
-                "- Restart the app: `python -m streamlit run app.py`"
-            )
 
     elif not run_clicked:
         if "last_result" in st.session_state:
             result = st.session_state["last_result"]
-            if matches := st.session_state.get("last_watchlist_matches"):
-                names = ", ".join(m["supplier"] for m in matches)
+            if st.session_state.get("last_watchlist_matches"):
+                matches = st.session_state["last_watchlist_matches"]
+                names   = ", ".join(m["supplier"] for m in matches)
                 st.warning(
-                    f"⚠️ Watchlist alert — this incident involves "
-                    f"**{len(matches)}** tracked supplier(s): **{names}**."
-                )
+                    f"⚠️ Watchlist alert — **{len(matches)}** tracked supplier(s): **{names}**.")
             render_results(result)
         else:
             st.markdown(
                 '<div style="text-align:center;padding:3rem;color:#aaa;">'
                 'Click an example above or paste your own incident report, '
-                'then click Run analysis</div>',
-                unsafe_allow_html=True
-            )
+                'then click Run analysis</div>', unsafe_allow_html=True)
+
+
 if __name__ == "__main__":
     main()
