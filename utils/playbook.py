@@ -212,6 +212,24 @@ def delete_playbook(incident_type: str, user_id: int = 0):
     conn.commit()
     conn.close()
 
+def get_playbook(incident_type: str, user_id: int = 0) -> dict | None:
+    init_playbooks()
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM playbooks WHERE incident_type = ? AND user_id = ?",
+        (incident_type, user_id)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    for field in ["early_warnings", "first_24h", "root_causes",
+                  "what_worked", "what_failed", "key_contacts", "success_metrics"]:
+        try:
+            d[field] = json.loads(d.get(field) or "[]")
+        except Exception:
+            d[field] = []
+    return d
 
 def get_incident_type_counts(user_id: int = 0) -> dict:
     init_db()
